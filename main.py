@@ -7,8 +7,7 @@ import torch.optim as optim
 import passivitycheck as pc
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
-import fast_gradient_method as fgm
-import projected_gradient_descent as pgd
+import attacks as att
 
 
 class Net(nn.Module):
@@ -48,7 +47,7 @@ class Net(nn.Module):
         return weights, biases
 
 
-def train(args, model, device, train_loader, optimizer, epoch, refmat=None):
+def train(args, model, device, train_loader, optimizer, epoch, gamma=0, refmat=None,L=0):
     
     model.train()
     W_bar ={}
@@ -62,11 +61,11 @@ def train(args, model, device, train_loader, optimizer, epoch, refmat=None):
                 if 'weight' in name:
                     if 'conv' in name:
                         if args.passive_conv:
-                            W_bar[name] = torch.tensor(refmat[name])
-                            loss += torch.sum((param-W_bar[name])**2)
+                            W_bar[name] = refmat[name].clone().detach()
+                            loss += torch.mul(torch.mul(torch.sum((param-W_bar[name])**2),L),gamma)
                     else:
-                        W_bar[name] = torch.tensor(refmat[name])
-                        loss += torch.sum((param-W_bar[name])**2)
+                        W_bar[name] =refmat[name].clone().detach()
+                        loss += torch.mul(torch.mul(torch.sum((param-W_bar[name])**2),L),gamma)
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
@@ -76,7 +75,7 @@ def train(args, model, device, train_loader, optimizer, epoch, refmat=None):
                 break
 
 
-def test(model, device, test_loader,refmat=None):
+def test(args,model, device, test_loader,gamma=0,refmat=None,L=0):
     model.eval()
     test_loss = 0
     correct = 0
@@ -89,8 +88,13 @@ def test(model, device, test_loader,refmat=None):
             if refmat is not None:
                 for name, param in model.named_parameters():
                     if 'weight' in name:
-                        W_bar[name] = torch.tensor(refmat[name])
-                        test_loss += torch.sum((param-W_bar[name])**2)
+                        if 'conv' in name:
+                            if args.passive_conv:
+                                W_bar[name] = refmat[name].clone().detach()
+                                test_loss += torch.mul(torch.mul(torch.sum((param-W_bar[name])**2),L),gamma)
+                        else:
+                            W_bar[name] = refmat[name].clone().detach()
+                            test_loss += torch.mul(torch.mul(torch.sum((param-W_bar[name])**2),L),gamma)
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
 
@@ -100,19 +104,32 @@ def test(model, device, test_loader,refmat=None):
         test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
 
-def test_attack(model, device, test_data,labels,attack_type,epsilon):
+def test_attack(model, device, test_loader,attack,attack_type,epsilon,gamma=0,refmat=None,L=0):
     model.eval()
     test_loss = 0
     correct = 0
-    test_data, labels = test_data.to(device), labels.to(device)
-    output = model(test_data)
-    test_loss += F.nll_loss(output, labels,reduction='sum').item()
-    pred = output.argmax(dim=1, keepdim=True)
-    correct += pred.eq(labels.view_as(pred)).sum().item()
-    test_loss /= len(test_data)
+    W_bar ={}
+    with torch.no_grad():
+        for batch_idx, (data, target) in enumerate(test_loader):
+            data, target = data.to(device), target.to(device)
+            output = model(attack)
+            test_loss += F.nll_loss(output[batch_idx*len(data):(batch_idx+1)*len(data),:], target,reduction='sum').item()
+            if refmat is not None:
+                for name, param in model.named_parameters():
+                    if 'weight' in name:
+                        if 'conv' in name:
+                            if args.passive_conv:
+                                W_bar[name] = refmat[name].clone().detach()
+                                test_loss += torch.mul(torch.mul(torch.sum((param-W_bar[name])**2),L),gamma)
+                        else:
+                            W_bar[name] = refmat[name].clone().detach()
+                            test_loss += torch.mul(torch.mul(torch.sum((param-W_bar[name])**2),L.detach().numpy()),gamma)
+            pred = output[batch_idx*len(data):(batch_idx+1)*len(data),:].argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+    test_loss /= len(test_loader.dataset)
     print('\nTest set loss to {} attack (strength {}): {:.4f}, Accuracy: {}/{} ({:.2f}%)'.format(attack_type,epsilon,
-        test_loss, correct, len(test_data),
-        100. * correct / len(test_data)))
+        test_loss, correct, len(test_loader.dataset),
+        100. * correct / len(test_loader.dataset)))
 
 def main():
     # Training settings
@@ -142,7 +159,7 @@ def main():
     parser.add_argument('--passive-conv', action='store_true', default=False,
                         help='Passive Convolution Layers')
 
-    epsilon = [0.5, 1, 3, 5]
+    epsilon = [0.1, 0.2, 0.3, 0.5]
     
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -163,7 +180,8 @@ def main():
 
     transform=transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
+#      transforms.Normalize((0.1307,), (0.3081,))
+        transforms.Normalize((0,), (1,))
         ])
     dataset1 = datasets.MNIST('../data', train=True, download=True,transform=transform)
     dataset2 = datasets.MNIST('../data', train=False,transform=transform)
@@ -177,7 +195,7 @@ def main():
     if not args.no_train:
         for epoch in range(1, args.epochs + 1):
             train(args, model, device, train_loader, optimizer, epoch)
-            test(model, device, test_loader)
+            test(args,model, device, test_loader)
             scheduler.step()
         if args.save_model:
             torch.save(model.state_dict(), "mnist_cnn_regular.pt")
@@ -194,17 +212,11 @@ def main():
             labels.append(target)
     test_data = torch.cat(test_data,dim=0)
     labels = torch.cat(labels,dim=0)
-    
-    test(auxmodel,device,test_loader)
 
-    print("Vanilla Model Test Errors to Attacks\n")
-    for i in epsilon:
-        fgm_adv = fgm.fast_gradient_method(auxmodel,test_data,i,2,clip_min=-0.4242,clip_max=2.8215)
-        test_attack(auxmodel,device,fgm_adv,labels,"FGM",i)
-    
-        pgd_adv = pgd.projected_gradient_descent(auxmodel,test_data,i,0.1,10,2,clip_min=-0.4242,clip_max=2.8215)
-        test_attack(auxmodel,device,pgd_adv,labels,"PGD",i)
+    gamma=torch.tensor(0.1)
 
+    Wbar=None
+    L=torch.tensor(0)
     if not args.no_train:
         Wbar={}
         for i in range(1,10):
@@ -213,19 +225,18 @@ def main():
                     if 'conv' in name:
                         if args.passive_conv:
                             (d1,d2,d3,d4) = model.state_dict()[name].shape
-                            Wbar[name] = model.state_dict()[name]
                             for i in range(d1):
                                 for j in range (d2):
                                     Wbar[name][i,j,:,:] = model.state_dict()[name][i,j,:,:]*pc.checkindexes(model.state_dict()[name][i,j,:,:],-0.05,4.74)
+                                    L = L+torch.linalg.matrix_norm(Wbar[name][i,j,:,:]-model.state_dict()[name][i,j,:,:])
                     else:
                         Wbar[name] = model.state_dict()[name]*pc.checkindexes(model.state_dict()[name],-0.05,4.74)
+                        L = L+torch.linalg.matrix_norm(Wbar[name]-model.state_dict()[name])
+            print(L)
             for epoch in range(1, args.epochs + 1):
-                train(args, model, device, train_loader, optimizer, epoch,Wbar)
-                test(model, device, test_loader,Wbar)
+                train(args, model, device, train_loader, optimizer, epoch,gamma,Wbar,L)
+                test(args,model, device, test_loader,gamma,Wbar,L)
                 scheduler.step()
-
-    for name in auxdict:
-        model.state_dict()[name]=Wbar[name]
     
     if args.save_model:
         if args.passive_conv:
@@ -242,17 +253,26 @@ def main():
         auxmodel2 = Net().to(device)
         auxmodel2.load_state_dict(auxdict2)            
 
-    print("Robust Model Test Errors to Attacks\n")
+    print("Vanilla Model Test Errors to Attacks\n")
+    test(args,auxmodel,device,test_loader)
+  
+    for i in epsilon:
+        fgm_adv = att.fgm(auxmodel,test_data,i,2)
+        test_attack(auxmodel,device,test_loader,fgm_adv,"FGM",i,gamma,Wbar,L)
+    
+        pgd_adv = att.pgd(auxmodel,test_data,i,0.1,10,2)
+        test_attack(auxmodel,device,test_loader,pgd_adv,"PGD",i,gamma,Wbar,L)
 
-    test(auxmodel2,device,test_loader)
+    print("Robust Model Test Errors to Attacks\n")
+    test(args,auxmodel2,device,test_loader)
     
     for i in epsilon: 
 
-        fgm_adv = fgm.fast_gradient_method(auxmodel2,test_data,i,2,clip_min=-0.4242,clip_max=2.8215)
-        test_attack(auxmodel2,device,fgm_adv,labels,"FGM",i) 
+        fgm_adv = att.fgm(auxmodel2,test_data,i,2)
+        test_attack(auxmodel2,device,test_loader,fgm_adv,"FGM",i,gamma,Wbar,L) 
 
-        pgd_adv = pgd.projected_gradient_descent(auxmodel2,test_data,i,0.1,10,2,clip_min=-0.4242,clip_max=2.8215)
-        test_attack(auxmodel2,device,pgd_adv,labels,"PGD",i)
+        pgd_adv = att.pgd(auxmodel2,test_data,i,0.1,10,2)
+        test_attack(auxmodel2,device,test_loader,pgd_adv,"PGD",i,gamma,Wbar,L)
 
 if __name__ == '__main__':
     main()

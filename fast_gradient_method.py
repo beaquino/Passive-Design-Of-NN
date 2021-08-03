@@ -1,6 +1,7 @@
 """The Fast Gradient Method attack."""
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from utils import optimize_linear
 
@@ -77,8 +78,7 @@ def fast_gradient_method(
         _, y = torch.max(model_fn(x), 1)
 
     # Compute loss
-    loss_fn = torch.nn.CrossEntropyLoss()
-    loss = loss_fn(model_fn(x), y)
+    loss = F.nll_loss(model_fn(x), y)
     # If attack is targeted, minimize loss of target label rather than maximize loss of correct label
     if targeted:
         loss = -loss
