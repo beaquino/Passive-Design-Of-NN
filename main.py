@@ -104,7 +104,7 @@ def test(args,model, device, test_loader,gamma=0,refmat=None,L=0):
         test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
 
-def test_attack(model, device, test_loader,attack,attack_type,epsilon,gamma=0,refmat=None,L=0):
+def test_attack(args,model, device, test_loader,attack,attack_type,epsilon,gamma=0,refmat=None,L=0):
     model.eval()
     test_loss = 0
     correct = 0
@@ -258,10 +258,10 @@ def main():
   
     for i in epsilon:
         fgm_adv = att.fgm(auxmodel,test_data,i,2)
-        test_attack(auxmodel,device,test_loader,fgm_adv,"FGM",i,gamma,Wbar,L)
+        test_attack(args,auxmodel,device,test_loader,fgm_adv,"FGM",i,gamma,Wbar,L)
     
         pgd_adv = att.pgd(auxmodel,test_data,i,0.1,10,2)
-        test_attack(auxmodel,device,test_loader,pgd_adv,"PGD",i,gamma,Wbar,L)
+        test_attack(args,auxmodel,device,test_loader,pgd_adv,"PGD",i,gamma,Wbar,L)
 
     print("Robust Model Test Errors to Attacks\n")
     test(args,auxmodel2,device,test_loader)
@@ -269,10 +269,10 @@ def main():
     for i in epsilon: 
 
         fgm_adv = att.fgm(auxmodel2,test_data,i,2)
-        test_attack(auxmodel2,device,test_loader,fgm_adv,"FGM",i,gamma,Wbar,L) 
+        test_attack(args,auxmodel2,device,test_loader,fgm_adv,"FGM",i,gamma,Wbar,L) 
 
         pgd_adv = att.pgd(auxmodel2,test_data,i,0.1,10,2)
-        test_attack(auxmodel2,device,test_loader,pgd_adv,"PGD",i,gamma,Wbar,L)
+        test_attack(args,auxmodel2,device,test_loader,pgd_adv,"PGD",i,gamma,Wbar,L)
 
 if __name__ == '__main__':
     main()
